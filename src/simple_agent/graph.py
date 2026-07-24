@@ -1,57 +1,280 @@
-"""Minimal LangChain agent graph for deployment."""
+"""Minimal LangChain agent graph with safer middleware-based long-term memory.
+
+This version avoids wrap_tool_call/awrap_tool_call entirely.
+It relies on:
+- before_agent: recall similar past web journeys
+- after_agent: save a structured journey/product memory
+
+It is designed for LangGraph Agent Server environments with built-in persistence,
+so it does not define a custom checkpointer or store in create_agent(...).
+"""
 
 from __future__ import annotations
 
 import ast
+import json
 import os
+import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
+
+from typing_extensions import NotRequired
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.tools import tool
-
-from playwright.sync_api import sync_playwright
-from langchain_core.tools import tool
+from langgraph.runtime import Runtime
 
 DEFAULT_MODEL = os.getenv("SIMPLE_AGENT_MODEL", "anthropic:claude-sonnet-4-6")
 
-_playwright = None
-_browser = None
-_page = None
 
-def get_page():
-    global _playwright, _browser, _page
-    if _page is None:
-        _playwright = sync_playwright().start()
-        _browser = _playwright.chromium.launch(headless=True)
-        _page = _browser.new_page()
-    return _page
+class WebAgentState(AgentState):
+    user_id: NotRequired[str]
+    recalled_web_journeys: NotRequired[list[dict[str, Any]]]
+    current_user_task: NotRequired[str]
 
-@tool
-def open_page(url: str) -> str:
-    """Open a webpage and wait until the DOM is ready."""
-    page = get_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    return f"Opened {page.url}"
 
-@tool
-def click(selector: str) -> str:
-    """Click an element by CSS selector."""
-    page = get_page()
-    page.click(selector, timeout=10000)
-    return f"Clicked {selector}"
+def _utc_now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
 
-@tool
-def read_page() -> str:
-    """Return the visible page text."""
-    page = get_page()
-    return page.locator("body").inner_text()[:12000]
+
+def _journey_namespace(user_id: str) -> tuple[str, ...]:
+    return ("memories", user_id, "web_journeys")
+
+
+def _extract_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    urls = re.findall(r"https?://[^\s)\]>\"]+", text)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for url in urls:
+        clean = url.rstrip('.,;')
+        if clean not in seen:
+            seen.add(clean)
+            ordered.append(clean)
+    return ordered
+
+
+def _extract_domains(urls: list[str]) -> list[str]:
+    domains: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        try:
+            domain = urlparse(url).netloc.lower()
+        except Exception:
+            domain = ""
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
+
+
+def _extract_product_candidates(answer: str) -> list[dict[str, Any]]:
+    products: list[dict[str, Any]] = []
+    if not answer:
+        return products
+
+    lines = [line.strip(" -*\t") for line in answer.splitlines() if line.strip()]
+    feature_markers = (
+        "feature",
+        "features",
+        "spec",
+        "specs",
+        "processor",
+        "cpu",
+        "gpu",
+        "ram",
+        "memory",
+        "storage",
+        "display",
+        "screen",
+        "battery",
+        "camera",
+        "price",
+    )
+
+    current: dict[str, Any] | None = None
+    for line in lines:
+        if ":" in line and len(line.split(":" , 1)[0].split()) <= 4:
+            label, value = [part.strip() for part in line.split(":", 1)]
+            key = label.lower()
+            if key in {"product", "name", "model", "item"} and value:
+                if current:
+                    products.append(current)
+                current = {
+                    "name": value,
+                    "brand": value.split()[0] if value else "",
+                    "features": [],
+                }
+                continue
+
+            if current and any(marker in key for marker in feature_markers) and value:
+                current.setdefault("features", []).append(f"{label}: {value}")
+                continue
+
+        if line.startswith(("-", "•")):
+            bullet = line.lstrip("-• ").strip()
+            if current and bullet:
+                current.setdefault("features", []).append(bullet)
+
+    if current:
+        products.append(current)
+
+    if products:
+        return products[:10]
+
+    sentence_products: list[dict[str, Any]] = []
+    sentences = re.split(r"(?<=[.!?])\s+", answer)
+    product_pattern = re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z0-9][A-Za-z0-9+\-/]*){0,5})\b"
+    )
+
+    for sentence in sentences:
+        if not any(marker in sentence.lower() for marker in feature_markers):
+            continue
+        matches = product_pattern.findall(sentence)
+        if not matches:
+            continue
+        name = matches[0].strip()
+        sentence_products.append(
+            {
+                "name": name,
+                "brand": name.split()[0] if name else "",
+                "features": [sentence.strip()],
+            }
+        )
+
+    deduped: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for product in sentence_products:
+        name = product.get("name", "")
+        if name and name not in seen_names:
+            seen_names.add(name)
+            deduped.append(product)
+
+    return deduped[:10]
+
+
+class WebJourneyMemoryMiddleware(AgentMiddleware):
+    """Recall past web journeys before the run and save one structured memory after."""
+
+    state_schema = WebAgentState
+
+    def before_agent(
+        self,
+        state: WebAgentState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        user_id = state.get("user_id")
+        if not user_id:
+            return None
+
+        messages = state.get("messages", [])
+        latest_user_text = ""
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) == "human":
+                latest_user_text = str(getattr(msg, "content", ""))
+                break
+
+        if not latest_user_text:
+            return {"recalled_web_journeys": [], "current_user_task": ""}
+
+        store = getattr(runtime, "store", None)
+        if store is None:
+            return {
+                "recalled_web_journeys": [],
+                "current_user_task": latest_user_text,
+            }
+
+        try:
+            results = store.search(
+                _journey_namespace(user_id),
+                query=latest_user_text,
+                limit=3,
+            )
+        except Exception:
+            results = []
+
+        recalled: list[dict[str, Any]] = []
+        for item in results:
+            value = getattr(item, "value", None) or {}
+            if isinstance(value, dict):
+                recalled.append(value)
+
+        return {
+            "recalled_web_journeys": recalled,
+            "current_user_task": latest_user_text,
+        }
+
+    def after_agent(
+        self,
+        state: WebAgentState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        user_id = state.get("user_id")
+        task = state.get("current_user_task", "")
+        if not user_id or not task:
+            return None
+
+        store = getattr(runtime, "store", None)
+        if store is None:
+            return None
+
+        final_answer = ""
+        messages = state.get("messages", [])
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) == "ai":
+                final_answer = str(getattr(msg, "content", ""))
+                break
+
+        recalled = state.get("recalled_web_journeys", []) or []
+        recalled_ids = [
+            m.get("memory_id")
+            for m in recalled
+            if isinstance(m, dict) and m.get("memory_id")
+        ]
+
+        urls = _extract_urls(final_answer)
+        domains = _extract_domains(urls)
+        products = _extract_product_candidates(final_answer)
+
+        memory_type = "product_search" if products else "web_journey"
+        memory_doc = {
+            "memory_id": str(uuid.uuid4()),
+            "type": memory_type,
+            "task": task,
+            "saved_at": _utc_now(),
+            "result": final_answer[:2000],
+            "products": products,
+            "product_names": [p.get("name", "") for p in products if p.get("name")],
+            "brands": sorted({p.get("brand", "") for p in products if p.get("brand")}),
+            "urls": urls[:10],
+            "domains": domains,
+            "used_recalled_memories": recalled_ids,
+            "success": bool(final_answer),
+        }
+
+        try:
+            store.put(
+                _journey_namespace(user_id),
+                memory_doc["memory_id"],
+                memory_doc,
+            )
+        except Exception:
+            return None
+
+        print("Saved memory_doc:")
+        print(json.dumps(memory_doc, indent=2, ensure_ascii=False))
+        return None
 
 
 @tool
 def utc_now() -> str:
     """Return the current UTC timestamp in ISO format."""
-    return datetime.now(tz=timezone.utc).isoformat()
+    return _utc_now()
 
 
 @tool
@@ -81,16 +304,54 @@ def calculator(expression: str) -> str:
         if not isinstance(node, allowed_nodes):
             raise ValueError("Expression contains unsupported syntax")
 
-    result: Any = eval(compile(parsed, "<calculator>", "eval"), {"__builtins__": {}}, {})
+    result: Any = eval(compile(parsed, "", "eval"), {"__builtins__": {}}, {})
     return str(result)
+
+
+@tool
+def open_page(url: str) -> str:
+    """Open a webpage in Chromium and return the final URL and title."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "Playwright is not installed. Run: python -m pip install playwright && python -m playwright install chromium"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        final_url = page.url
+        title = page.title()
+        browser.close()
+        return f"Opened: {final_url} | Title: {title}"
+
+
+@tool
+def read_page(url: str) -> str:
+    """Open a webpage and return visible body text."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "Playwright is not installed. Run: python -m pip install playwright && python -m playwright install chromium"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        text = page.locator("body").inner_text()[:12000]
+        browser.close()
+        return text
 
 
 graph = create_agent(
     model=DEFAULT_MODEL,
-    tools=[utc_now, calculator, open_page, click, read_page],
+    tools=[utc_now, calculator, open_page, read_page],
+    middleware=[WebJourneyMemoryMiddleware()],
+    state_schema=WebAgentState,
     system_prompt=(
         "You are a concise assistant. "
-        "Use tools when they add factual precision, then return a direct answer."
+        "Use tools when they add factual precision, then return a direct answer. "
+        "If recalled_web_journeys exists in state, use it only as a hint and verify with current browsing."
     ),
     name="simple_agent",
 )
