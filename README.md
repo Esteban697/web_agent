@@ -1,13 +1,8 @@
-# Simple Agent Template
+# Web Agent in LangGraph
 
-Minimal deployment template for a LangChain agent built with `create_agent(...)`.
-
-## What this template gives you
-
-- A deployable LangGraph entrypoint at `src/simple_agent/graph.py`.
-- Two small tools (`utc_now`, `calculator`) for predictable local behavior.
-- `langgraph.json` configured for LangSmith/LangGraph deployment.
-- A `uv`-managed local workflow with a small `Makefile` wrapper and starter tests.
+Web Agent is a flexible up-to-date implementation in LangGraph capable of browsing the web to find useful information for the user.
+It can go to a URL, click and read through the content to find relevant information about the human message delivered.
+It is deployable in LangGraph Studio to easily test.
 
 ## Quickstart
 
