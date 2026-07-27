@@ -10,7 +10,7 @@ so it does not define a custom checkpointer or store in create_agent(...).
 """
 
 from __future__ import annotations
-
+import traceback
 import ast
 import json
 import os
@@ -22,10 +22,15 @@ from urllib.parse import urlparse
 
 from typing_extensions import NotRequired
 
+import langchain
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.tools import tool
 from langgraph.runtime import Runtime
+from langgraph.store.base import BaseStore
+
+#Prints out relevant data to the terminal for better debugging
+langchain.debug = True
 
 DEFAULT_MODEL = os.getenv("SIMPLE_AGENT_MODEL", "anthropic:claude-sonnet-4-6")
 
@@ -47,11 +52,11 @@ def _journey_namespace(user_id: str) -> tuple[str, ...]:
 def _extract_urls(text: str) -> list[str]:
     if not text:
         return []
-    urls = re.findall(r"https?://[^\s)\]>\"]+", text)
+    urls = re.findall(r'https?://[^\s)\]>\"]+', text)
     seen: set[str] = set()
     ordered: list[str] = []
     for url in urls:
-        clean = url.rstrip('.,;')
+        clean = url.rstrip(".,;")
         if clean not in seen:
             seen.add(clean)
             ordered.append(clean)
@@ -98,9 +103,10 @@ def _extract_product_candidates(answer: str) -> list[dict[str, Any]]:
 
     current: dict[str, Any] | None = None
     for line in lines:
-        if ":" in line and len(line.split(":" , 1)[0].split()) <= 4:
+        if ":" in line and len(line.split(":", 1)[0].split()) <= 4:
             label, value = [part.strip() for part in line.split(":", 1)]
             key = label.lower()
+
             if key in {"product", "name", "model", "item"} and value:
                 if current:
                     products.append(current)
@@ -157,78 +163,122 @@ def _extract_product_candidates(answer: str) -> list[dict[str, Any]]:
 
     return deduped[:10]
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
 
 class WebJourneyMemoryMiddleware(AgentMiddleware):
     """Recall past web journeys before the run and save one structured memory after."""
 
     state_schema = WebAgentState
 
-    def before_agent(
+    async def abefore_agent(
         self,
         state: WebAgentState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
+        print("[before_agent] start")
         user_id = state.get("user_id")
+        print(f"[before_agent] user_id={user_id!r}")
         if not user_id:
+            print("[before_agent] missing user_id; skipping recall")
             return None
 
         messages = state.get("messages", [])
+        print(f"[before_agent] messages_count={len(messages)}")
         latest_user_text = ""
         for msg in reversed(messages):
             if getattr(msg, "type", None) == "human":
                 latest_user_text = str(getattr(msg, "content", ""))
                 break
 
+        print(f"[before_agent] latest_user_text={latest_user_text!r}")
         if not latest_user_text:
+            print("[before_agent] no latest user text found")
             return {"recalled_web_journeys": [], "current_user_task": ""}
 
         store = getattr(runtime, "store", None)
+        print(f"[before_agent] runtime_has_store={store is not None}")
         if store is None:
+            print("[before_agent] runtime.store is None; returning empty recall")
             return {
                 "recalled_web_journeys": [],
                 "current_user_task": latest_user_text,
             }
 
+        namespace = _journey_namespace(user_id)
+        print(f"[before_agent] namespace={namespace}")
+
         try:
-            results = store.search(
+            results = await store.asearch(
                 _journey_namespace(user_id),
-                query=latest_user_text,
-                limit=3,
+                limit=20,
             )
-        except Exception:
+            print(f"[before_agent] raw_results_count={len(results)}")
+        except Exception as e:
+            print(f"[before_agent] store.search exception: {type(e).__name__}: {e}")
+            print(traceback.format_exc())
             results = []
 
         recalled: list[dict[str, Any]] = []
-        for item in results:
+        for idx, item in enumerate(results):
             value = getattr(item, "value", None) or {}
+            key = getattr(item, "key", None)
+            print(
+                f"[before_agent] result[{idx}] key={key!r} value_type={type(value).__name__}"
+            )
             if isinstance(value, dict):
                 recalled.append(value)
+
+        print(f"[before_agent] recalled_count={len(recalled)}")
+        if recalled:
+            memory_ids = [m.get("memory_id") for m in recalled if isinstance(m, dict)]
+            print(f"[before_agent] recalled_memory_ids={memory_ids}")
 
         return {
             "recalled_web_journeys": recalled,
             "current_user_task": latest_user_text,
         }
 
-    def after_agent(
+    async def aafter_agent(
         self,
         state: WebAgentState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
+        print("[after_agent] start")
         user_id = state.get("user_id")
         task = state.get("current_user_task", "")
+        print(f"[after_agent] user_id={user_id!r}")
+        print(f"[after_agent] task={task!r}")
         if not user_id or not task:
+            print("[after_agent] missing user_id or task; skipping save")
             return None
 
         store = getattr(runtime, "store", None)
+        print(f"[after_agent] runtime_has_store={store is not None}")
         if store is None:
+            print("[after_agent] runtime.store is None; skipping save")
             return None
 
         final_answer = ""
         messages = state.get("messages", [])
+        print(f"[after_agent] messages_count={len(messages)}")
         for msg in reversed(messages):
             if getattr(msg, "type", None) == "ai":
-                final_answer = str(getattr(msg, "content", ""))
+                final_answer = _message_text(getattr(msg, "content", ""))
                 break
+
+        print(f"[after_agent] final_answer_preview={final_answer[:300]!r}")
 
         recalled = state.get("recalled_web_journeys", []) or []
         recalled_ids = [
@@ -236,10 +286,18 @@ class WebJourneyMemoryMiddleware(AgentMiddleware):
             for m in recalled
             if isinstance(m, dict) and m.get("memory_id")
         ]
+        print(f"[after_agent] recalled_ids={recalled_ids}")
 
         urls = _extract_urls(final_answer)
         domains = _extract_domains(urls)
         products = _extract_product_candidates(final_answer)
+        print(f"[after_agent] urls={urls[:10]}")
+        print(f"[after_agent] domains={domains}")
+        print(f"[after_agent] products_count={len(products)}")
+        if products:
+            print(
+                f"[after_agent] product_names={[p.get('name') for p in products if isinstance(p, dict)]}"
+            )
 
         memory_type = "product_search" if products else "web_journey"
         memory_doc = {
@@ -257,16 +315,23 @@ class WebJourneyMemoryMiddleware(AgentMiddleware):
             "success": bool(final_answer),
         }
 
+        namespace = _journey_namespace(user_id)
+        print(f"[after_agent] namespace={namespace}")
+        print(f"[after_agent] memory_id={memory_doc['memory_id']}")
+
         try:
-            store.put(
-                _journey_namespace(user_id),
+            await store.aput(
+                namespace,
                 memory_doc["memory_id"],
                 memory_doc,
             )
-        except Exception:
+            print("[after_agent] store.put success")
+        except Exception as e:
+            print(f"[after_agent] store.put exception: {type(e).__name__}: {e}")
+            print(traceback.format_exc())
             return None
 
-        print("Saved memory_doc:")
+        print("[after_agent] saved memory_doc:")
         print(json.dumps(memory_doc, indent=2, ensure_ascii=False))
         return None
 

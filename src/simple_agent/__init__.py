@@ -1,1 +1,1 @@
-"""Simple agent template package."""
+"""Web Agent - based on simple agent template package."""
