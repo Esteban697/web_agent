@@ -10,35 +10,73 @@ so it does not define a custom checkpointer or store in create_agent(...).
 """
 
 from __future__ import annotations
-import traceback
+
 import ast
 import json
 import os
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
+from pydantic import BaseModel, Field
 from typing_extensions import NotRequired
 
-import langchain
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.runtime import Runtime
-from langgraph.store.base import BaseStore
-
-#Prints out relevant data to the terminal for better debugging
-langchain.debug = True
 
 DEFAULT_MODEL = os.getenv("SIMPLE_AGENT_MODEL", "anthropic:claude-sonnet-4-6")
+TRUSTCALL_MEMORY_MODEL = os.getenv("TRUSTCALL_MEMORY_MODEL", DEFAULT_MODEL)
 
 
 class WebAgentState(AgentState):
     user_id: NotRequired[str]
     recalled_web_journeys: NotRequired[list[dict[str, Any]]]
     current_user_task: NotRequired[str]
+
+
+class ProductMemory(BaseModel):
+    """Structured product extracted from a web journey result."""
+
+    name: str = Field(description="Product name exactly as found if available")
+    brand: str = Field(default="", description="Brand or vendor name")
+    category: str = Field(default="", description="General category such as laptop, tablet, phone")
+    price_text: str = Field(default="", description="Raw displayed price text if present")
+    url: str = Field(default="", description="Product page URL if present")
+    features: list[str] = Field(default_factory=list, description="Key extracted product features")
+
+
+class WebJourneyMemory(BaseModel):
+    """Structured memory record for one browsing journey and its discovered products."""
+
+    memory_id: str = Field(description="Stable memory record identifier")
+    type: Literal["web_journey", "product_search"] = Field(description="Type of memory")
+    user_id: str = Field(description="User identifier for namespacing and filtering")
+    task: str = Field(description="Original user task for this journey")
+    saved_at: str = Field(description="UTC ISO timestamp when the memory was saved")
+    result: str = Field(description="Concise normalized assistant answer")
+    summary: str = Field(default="", description="One or two sentence summary of the journey")
+    products: list[ProductMemory] = Field(default_factory=list, description="Products extracted from the journey")
+    product_names: list[str] = Field(default_factory=list, description="Flattened product names for retrieval")
+    brands: list[str] = Field(default_factory=list, description="Flattened brands for retrieval")
+    urls: list[str] = Field(default_factory=list, description="Relevant URLs mentioned or used")
+    domains: list[str] = Field(default_factory=list, description="Domains present in the journey")
+    used_recalled_memories: list[str] = Field(default_factory=list, description="Memory ids used as recall context")
+    success: bool = Field(description="Whether the run produced a usable answer")
+
+
+_TRUSTCALL_EXTRACTOR = None
+_TRUSTCALL_INIT_ERROR: Exception | None = None
+
+try:
+    from trustcall import create_extractor
+except Exception as e:  # pragma: no cover
+    create_extractor = None
+    _TRUSTCALL_INIT_ERROR = e
 
 
 def _utc_now() -> str:
@@ -56,7 +94,7 @@ def _extract_urls(text: str) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for url in urls:
-        clean = url.rstrip(".,;")
+        clean = url.rstrip('.,;')
         if clean not in seen:
             seen.add(clean)
             ordered.append(clean)
@@ -77,104 +115,163 @@ def _extract_domains(urls: list[str]) -> list[str]:
     return domains
 
 
-def _extract_product_candidates(answer: str) -> list[dict[str, Any]]:
-    products: list[dict[str, Any]] = []
-    if not answer:
-        return products
-
-    lines = [line.strip(" -*\t") for line in answer.splitlines() if line.strip()]
-    feature_markers = (
-        "feature",
-        "features",
-        "spec",
-        "specs",
-        "processor",
-        "cpu",
-        "gpu",
-        "ram",
-        "memory",
-        "storage",
-        "display",
-        "screen",
-        "battery",
-        "camera",
-        "price",
-    )
-
-    current: dict[str, Any] | None = None
-    for line in lines:
-        if ":" in line and len(line.split(":", 1)[0].split()) <= 4:
-            label, value = [part.strip() for part in line.split(":", 1)]
-            key = label.lower()
-
-            if key in {"product", "name", "model", "item"} and value:
-                if current:
-                    products.append(current)
-                current = {
-                    "name": value,
-                    "brand": value.split()[0] if value else "",
-                    "features": [],
-                }
-                continue
-
-            if current and any(marker in key for marker in feature_markers) and value:
-                current.setdefault("features", []).append(f"{label}: {value}")
-                continue
-
-        if line.startswith(("-", "•")):
-            bullet = line.lstrip("-• ").strip()
-            if current and bullet:
-                current.setdefault("features", []).append(bullet)
-
-    if current:
-        products.append(current)
-
-    if products:
-        return products[:10]
-
-    sentence_products: list[dict[str, Any]] = []
-    sentences = re.split(r"(?<=[.!?])\s+", answer)
-    product_pattern = re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z0-9][A-Za-z0-9+\-/]*){0,5})\b"
-    )
-
-    for sentence in sentences:
-        if not any(marker in sentence.lower() for marker in feature_markers):
-            continue
-        matches = product_pattern.findall(sentence)
-        if not matches:
-            continue
-        name = matches[0].strip()
-        sentence_products.append(
-            {
-                "name": name,
-                "brand": name.split()[0] if name else "",
-                "features": [sentence.strip()],
-            }
-        )
-
-    deduped: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for product in sentence_products:
-        name = product.get("name", "")
-        if name and name not in seen_names:
-            seen_names.add(name)
-            deduped.append(product)
-
-    return deduped[:10]
-
 def _message_text(content: Any) -> str:
     if isinstance(content, str):
         return content
+
     if isinstance(content, list):
-        parts = []
+        parts: list[str] = []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(item.get("text", ""))
+                parts.append(str(item.get("text", "")))
             elif isinstance(item, str):
                 parts.append(item)
         return "\n".join(part for part in parts if part)
+
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text", ""))
+        return json.dumps(content, ensure_ascii=False)
+
     return str(content)
+
+
+def _get_memory_extractor():
+    global _TRUSTCALL_EXTRACTOR
+    if _TRUSTCALL_EXTRACTOR is not None:
+        return _TRUSTCALL_EXTRACTOR
+    if create_extractor is None:
+        raise RuntimeError(
+            f"Trustcall is not available: {_TRUSTCALL_INIT_ERROR}. Install with `pip install trustcall`."
+        )
+    _TRUSTCALL_EXTRACTOR = create_extractor(
+        TRUSTCALL_MEMORY_MODEL,
+        tools=[WebJourneyMemory],
+        tool_choice="WebJourneyMemory",
+    )
+    print("_TRUSTCALL_EXTRACTOR successfully created!")
+    return _TRUSTCALL_EXTRACTOR
+
+
+def _fallback_memory_doc(
+    *,
+    user_id: str,
+    task: str,
+    final_answer: str,
+    recalled_ids: list[str],
+) -> dict[str, Any]:
+    urls = _extract_urls(final_answer)
+    domains = _extract_domains(urls)
+    return {
+        "memory_id": str(uuid.uuid4()),
+        "type": "web_journey",
+        "user_id": user_id,
+        "task": task,
+        "saved_at": _utc_now(),
+        "result": final_answer[:2000],
+        "summary": final_answer[:400],
+        "products": [],
+        "product_names": [],
+        "brands": [],
+        "urls": urls[:10],
+        "domains": domains,
+        "used_recalled_memories": recalled_ids,
+        "success": bool(final_answer),
+    }
+
+
+async def _extract_memory_with_trustcall(
+    *,
+    user_id: str,
+    task: str,
+    final_answer: str,
+    recalled_ids: list[str],
+) -> dict[str, Any]:
+    extractor = _get_memory_extractor()
+    base_urls = _extract_urls(final_answer)
+    base_domains = _extract_domains(base_urls)
+    memory_id = str(uuid.uuid4())
+    saved_at = _utc_now()
+
+    instruction = (
+        "Extract a single structured WebJourneyMemory object from the assistant answer. "
+        "Capture only products explicitly present in the answer. "
+        "Do not invent prices, features, brands, or URLs. "
+        "Set type='product_search' only when at least one product is clearly present; otherwise use 'web_journey'. "
+        "Keep result concise and preserve useful retrieval fields such as product_names, brands, urls, and domains."
+    )
+
+    messages = [
+        SystemMessage(content=instruction),
+        HumanMessage(
+            content=(
+                "Build a WebJourneyMemory JSON object using this context:\n\n"
+                f"user_id: {user_id}\n"
+                f"task: {task}\n"
+                f"memory_id: {memory_id}\n"
+                f"saved_at: {saved_at}\n"
+                f"used_recalled_memories: {json.dumps(recalled_ids, ensure_ascii=False)}\n"
+                f"urls_detected: {json.dumps(base_urls[:10], ensure_ascii=False)}\n"
+                f"domains_detected: {json.dumps(base_domains, ensure_ascii=False)}\n\n"
+                "assistant_answer:\n"
+                f"{final_answer[:6000]}"
+            )
+        ),
+    ]
+
+    result = await extractor.ainvoke({"messages": messages})
+
+    responses = []
+    if isinstance(result, dict):
+        responses = result.get("responses") or result.get("response") or []
+        if responses and not isinstance(responses, list):
+            responses = [responses]
+
+    structured = None
+    for item in responses:
+        if isinstance(item, WebJourneyMemory):
+            structured = item.model_dump()
+            break
+        if isinstance(item, dict):
+            structured = item
+            break
+
+    if not structured:
+        raise ValueError("Trustcall did not return a WebJourneyMemory response")
+
+    structured["memory_id"] = structured.get("memory_id") or memory_id
+    structured["user_id"] = structured.get("user_id") or user_id
+    structured["task"] = structured.get("task") or task
+    structured["saved_at"] = structured.get("saved_at") or saved_at
+    structured["used_recalled_memories"] = structured.get("used_recalled_memories") or recalled_ids
+    structured["urls"] = structured.get("urls") or base_urls[:10]
+    structured["domains"] = structured.get("domains") or base_domains
+    structured["success"] = bool(structured.get("result") or final_answer)
+
+    products = structured.get("products") or []
+    product_names = []
+    brands = []
+    normalized_products = []
+    for product in products:
+        if isinstance(product, ProductMemory):
+            product = product.model_dump()
+        if not isinstance(product, dict):
+            continue
+        normalized_products.append(product)
+        name = str(product.get("name", "")).strip()
+        brand = str(product.get("brand", "")).strip()
+        if name:
+            product_names.append(name)
+        if brand:
+            brands.append(brand)
+    structured["products"] = normalized_products
+    structured["product_names"] = structured.get("product_names") or product_names
+    structured["brands"] = structured.get("brands") or sorted(set(brands))
+    if not structured.get("type"):
+        structured["type"] = "product_search" if structured["products"] else "web_journey"
+
+    validated = WebJourneyMemory.model_validate(structured)
+    return validated.model_dump()
 
 
 class WebJourneyMemoryMiddleware(AgentMiddleware):
@@ -187,63 +284,41 @@ class WebJourneyMemoryMiddleware(AgentMiddleware):
         state: WebAgentState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        print("[before_agent] start")
         user_id = state.get("user_id")
-        print(f"[before_agent] user_id={user_id!r}")
         if not user_id:
-            print("[before_agent] missing user_id; skipping recall")
             return None
 
         messages = state.get("messages", [])
-        print(f"[before_agent] messages_count={len(messages)}")
         latest_user_text = ""
         for msg in reversed(messages):
             if getattr(msg, "type", None) == "human":
-                latest_user_text = str(getattr(msg, "content", ""))
+                latest_user_text = _message_text(getattr(msg, "content", ""))
                 break
 
-        print(f"[before_agent] latest_user_text={latest_user_text!r}")
         if not latest_user_text:
-            print("[before_agent] no latest user text found")
             return {"recalled_web_journeys": [], "current_user_task": ""}
 
         store = getattr(runtime, "store", None)
-        print(f"[before_agent] runtime_has_store={store is not None}")
         if store is None:
-            print("[before_agent] runtime.store is None; returning empty recall")
             return {
                 "recalled_web_journeys": [],
                 "current_user_task": latest_user_text,
             }
 
-        namespace = _journey_namespace(user_id)
-        print(f"[before_agent] namespace={namespace}")
-
         try:
             results = await store.asearch(
                 _journey_namespace(user_id),
-                limit=20,
+                query=latest_user_text,
+                limit=5,
             )
-            print(f"[before_agent] raw_results_count={len(results)}")
-        except Exception as e:
-            print(f"[before_agent] store.search exception: {type(e).__name__}: {e}")
-            print(traceback.format_exc())
+        except Exception:
             results = []
 
         recalled: list[dict[str, Any]] = []
-        for idx, item in enumerate(results):
+        for item in results:
             value = getattr(item, "value", None) or {}
-            key = getattr(item, "key", None)
-            print(
-                f"[before_agent] result[{idx}] key={key!r} value_type={type(value).__name__}"
-            )
             if isinstance(value, dict):
                 recalled.append(value)
-
-        print(f"[before_agent] recalled_count={len(recalled)}")
-        if recalled:
-            memory_ids = [m.get("memory_id") for m in recalled if isinstance(m, dict)]
-            print(f"[before_agent] recalled_memory_ids={memory_ids}")
 
         return {
             "recalled_web_journeys": recalled,
@@ -255,30 +330,21 @@ class WebJourneyMemoryMiddleware(AgentMiddleware):
         state: WebAgentState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        print("[after_agent] start")
         user_id = state.get("user_id")
         task = state.get("current_user_task", "")
-        print(f"[after_agent] user_id={user_id!r}")
-        print(f"[after_agent] task={task!r}")
         if not user_id or not task:
-            print("[after_agent] missing user_id or task; skipping save")
             return None
 
         store = getattr(runtime, "store", None)
-        print(f"[after_agent] runtime_has_store={store is not None}")
         if store is None:
-            print("[after_agent] runtime.store is None; skipping save")
             return None
 
         final_answer = ""
         messages = state.get("messages", [])
-        print(f"[after_agent] messages_count={len(messages)}")
         for msg in reversed(messages):
             if getattr(msg, "type", None) == "ai":
                 final_answer = _message_text(getattr(msg, "content", ""))
                 break
-
-        print(f"[after_agent] final_answer_preview={final_answer[:300]!r}")
 
         recalled = state.get("recalled_web_journeys", []) or []
         recalled_ids = [
@@ -286,52 +352,34 @@ class WebJourneyMemoryMiddleware(AgentMiddleware):
             for m in recalled
             if isinstance(m, dict) and m.get("memory_id")
         ]
-        print(f"[after_agent] recalled_ids={recalled_ids}")
 
-        urls = _extract_urls(final_answer)
-        domains = _extract_domains(urls)
-        products = _extract_product_candidates(final_answer)
-        print(f"[after_agent] urls={urls[:10]}")
-        print(f"[after_agent] domains={domains}")
-        print(f"[after_agent] products_count={len(products)}")
-        if products:
-            print(
-                f"[after_agent] product_names={[p.get('name') for p in products if isinstance(p, dict)]}"
+        try:
+            memory_doc = await _extract_memory_with_trustcall(
+                user_id=user_id,
+                task=task,
+                final_answer=final_answer,
+                recalled_ids=recalled_ids,
             )
-
-        memory_type = "product_search" if products else "web_journey"
-        memory_doc = {
-            "memory_id": str(uuid.uuid4()),
-            "type": memory_type,
-            "task": task,
-            "saved_at": _utc_now(),
-            "result": final_answer[:2000],
-            "products": products,
-            "product_names": [p.get("name", "") for p in products if p.get("name")],
-            "brands": sorted({p.get("brand", "") for p in products if p.get("brand")}),
-            "urls": urls[:10],
-            "domains": domains,
-            "used_recalled_memories": recalled_ids,
-            "success": bool(final_answer),
-        }
-
-        namespace = _journey_namespace(user_id)
-        print(f"[after_agent] namespace={namespace}")
-        print(f"[after_agent] memory_id={memory_doc['memory_id']}")
+        except Exception as e:
+            print(f"[aafter_agent] Trustcall extraction failed: {type(e).__name__}: {e}")
+            memory_doc = _fallback_memory_doc(
+                user_id=user_id,
+                task=task,
+                final_answer=final_answer,
+                recalled_ids=recalled_ids,
+            )
 
         try:
             await store.aput(
-                namespace,
+                _journey_namespace(user_id),
                 memory_doc["memory_id"],
                 memory_doc,
             )
-            print("[after_agent] store.put success")
         except Exception as e:
-            print(f"[after_agent] store.put exception: {type(e).__name__}: {e}")
-            print(traceback.format_exc())
+            print(f"[aafter_agent] store.aput failed: {type(e).__name__}: {e}")
             return None
 
-        print("[after_agent] saved memory_doc:")
+        print("Saved memory_doc:")
         print(json.dumps(memory_doc, indent=2, ensure_ascii=False))
         return None
 
