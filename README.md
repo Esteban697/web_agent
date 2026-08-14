@@ -18,7 +18,7 @@ This library is used for the LLM to have the capability to read through the brow
 
 ## Architecture
 
-
+![Web Agent Architecture](src/simple_agent/docs/Web_Agent_Architecture.png)
 
 ## Set Up
 
