@@ -16,52 +16,46 @@ The Postgres storage the *langgraph dev* command adds when packaging the LangGra
 **Trustcall:**
 This library is used for the LLM to have the capability to read through the browsing results and extract the values of the JSON fields in a more accurate way than just instructing it as part of the system prompt.
 
-## Quickstart
+## Architecture
 
-1. Sync the project with `uv`:
 
-```bash
-uv sync --dev
-```
 
-2. Configure environment:
+## Set Up
 
-```bash
-cp .env.example .env
-```
+### Prerequisites
 
-3. Run locally:
+- Python 3.13 or later
+- `uv` package manager (install from https://docs.astral.sh/uv/getting-started/)
+
+### Step 1: Create a Virtual Environment
 
 ```bash
-uv run langgraph dev
+# Create a virtual environment
+python -m venv venv
+
+# Activate the virtual environment
+# On macOS/Linux:
+source venv/bin/activate
+# On Windows:
+venv\Scripts\activate
 ```
 
-Optional `make` wrappers:
+### Step 2: Install Dependencies
 
 ```bash
-make dev
-make run
+uv sync --all-groups
 ```
 
-## Tests and lint
+This installs all project dependencies including development tools and the LangGraph CLI.
+
+### Step 3: Run LangSmith Studio
 
 ```bash
-make test
-make integration-tests
-make lint
-make format
+langgraph dev
 ```
 
-Integration tests are skipped unless `ANTHROPIC_API_KEY` is set.
+This starts the local development server at `http://127.0.0.1:2024`. You can now:
+- Interact with the agent through the web UI
+- Test memory recall and browsing capabilities
+- View execution traces and debugging information
 
-## Deploy to LangSmith
-
-1. Push this template to a Git repository.
-2. In LangSmith, create a new Deployment from that repo.
-3. Set required environment variables (`ANTHROPIC_API_KEY`, optionally `LANGSMITH_API_KEY`).
-4. Deploy using `langgraph.json` defaults.
-
-## Reference docs
-
-- LangChain quickstart: https://docs.langchain.com/oss/python/langchain/quickstart
-- LangChain deployment: https://docs.langchain.com/oss/python/langchain/deploy
