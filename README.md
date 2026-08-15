@@ -1,20 +1,42 @@
 # Web Agent in LangGraph
 
-Web Agent is a flexible up-to-date implementation in LangGraph capable of browsing the web to find products for the user.
-It is basically a flexible Product Reseatch Assistant that can save the general information about a product in the web store the user describes in the request.
-It can go to a specific URL or find it based on the user description, click and read through the content to find relevant information about the product or products it finds there.
-It is deployable in LangSmith Studio to easily test and debug.
+Web Agent is a sophisticated and flexible Product Research Assistant built with LangGraph, designed to intelligently browse the web and extract structured product information. It combines real-time web browsing with persistent long-term memory and semantic search to help users research products efficiently across multiple sessions.
+
+The agent navigates web pages, extracts detailed product data (name, brand, price, features, URLs), and stores everything in a structured format for future reference. It remembers past searches within conversations and across sessions, using intelligent semantic search to recall relevant discoveries without redundant browsing. With multi-user support, Trustcall-powered data extraction for accuracy, and deployment-ready integration with LangSmith Studio, Web Agent provides a complete solution for intelligent product research automation.
+
+Visit the **Features** section below for detailed information on each capability.
 
 ## Features:
 
-**Short term memory:**
-The agent will remember the previous message inside the same conversation when using the same value in "User Id" field (required).
+**Intelligent Web Browsing:**
+Navigate and extract content from web pages using Playwright-powered browser automation. The agent can open URLs, read page content, and analyze product information across e-commerce sites.
 
-**Long term memory:**
-The Postgres storage the *langgraph dev* command adds when packaging the LangGraph project saves the product information and the previous requests in a JSON structure that can be easily read and used for future features.
+**Structured Product Research:**
+Automatically extract and organize product data including name, brand, category, price, URLs, and key features. Each product is stored in a standardized format for easy comparison and retrieval.
 
-**Trustcall:**
-This library is used for the LLM to have the capability to read through the browsing results and extract the values of the JSON fields in a more accurate way than just instructing it as part of the system prompt.
+**Short-term Memory:**
+The agent maintains conversation context within the same session. When using the same User ID, it remembers previous messages and can reference earlier queries without re-browsing.
+
+**Long-term Memory with Semantic Search:**
+All browsing journeys and product discoveries are persisted in PostgreSQL (via *langgraph dev* command). The agent performs intelligent semantic search to recall relevant past searches, enabling it to answer follow-up questions using previously gathered data without redundant web browsing.
+
+**Multi-user Isolation:**
+Each user gets a separate memory namespace using their User ID. This ensures privacy and allows multiple concurrent users to maintain independent browsing histories.
+
+**Trustcall-powered Data Extraction:**
+Uses the Trustcall library for LLM-driven structured extraction of product information. This ensures more accurate JSON field population compared to simple prompt-based instructions, reducing hallucinations and incomplete data.
+
+**Memory-aware Responses:**
+The agent automatically recalls related past journeys before answering. It intelligently detects when users are asking about history versus requesting fresh information, adapting its retrieval strategy accordingly.
+
+**URL and Domain Tracking:**
+Automatically tracks and stores all URLs visited and domains encountered during each browsing journey for audit trails and future reference.
+
+**Utility Tools:**
+Includes built-in tools for arithmetic calculations and UTC timestamp retrieval to support price comparisons and time-sensitive product research.
+
+**LangSmith Studio Integration:**
+Deploy and test the agent directly in LangSmith Studio with full execution traces, debugging information, and visual workflow inspection for easy development and iteration.
 
 ## Architecture
 
@@ -59,3 +81,4 @@ This starts the local development server at `http://127.0.0.1:2024`. You can now
 - Test memory recall and browsing capabilities
 - View execution traces and debugging information
 
+![Web Agent running in LangSmith Studio](src/simple_agent/docs/Web_Agent_frame1.png)
