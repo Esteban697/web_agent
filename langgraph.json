@@ -1,5 +1,5 @@
 {
-  "$schema": "https://langgra.ph/schema.json",
+  "$schema": "https://langgraph/schema.json",
   "python_version": "3.13",
   "dependencies": ["."],
   "graphs": {

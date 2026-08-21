@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1536" height="1024" viewBox="0 0 1536 1024">
+<title>Animated web_agent architecture</title>
+<desc>Animated architecture diagram. The agent graph connectors show a moving flow, while the five How It Works stages are highlighted sequentially in an infinite loop.</desc>
+<style>
+    @keyframes dashFlow { to { stroke-dashoffset: -120; } }
+    @keyframes dashFlowShort { to { stroke-dashoffset: -80; } }
+    @keyframes stage1 { 0%,2%{opacity:0} 4%,18%{opacity:1} 20%,100%{opacity:0} }
+    @keyframes stage2 { 0%,20%{opacity:0} 22%,38%{opacity:1} 40%,100%{opacity:0} }
+    @keyframes stage3 { 0%,40%{opacity:0} 42%,58%{opacity:1} 60%,100%{opacity:0} }
+    @keyframes stage4 { 0%,60%{opacity:0} 62%,78%{opacity:1} 80%,100%{opacity:0} }
+    @keyframes stage5 { 0%,80%{opacity:0} 82%,98%{opacity:1} 100%{opacity:0} }
+    .flow { fill:none; stroke:#7dd3fc; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:10 14; opacity:0; filter:url(#glow); animation:dashFlow 1.2s linear infinite; }
+    .flow.stage1 { animation-name:dashFlow,stage1; animation-duration:1.2s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow.stage2 { animation-name:dashFlow,stage2; animation-duration:1.2s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow.stage3 { animation-name:dashFlow,stage3; animation-duration:1.2s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow.stage4 { animation-name:dashFlow,stage4; animation-duration:1.2s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow.stage5 { animation-name:dashFlow,stage5; animation-duration:1.2s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow2 { fill:none; stroke:#a78bfa; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:7 12; opacity:0; filter:url(#glow); animation:dashFlowShort .7s linear infinite; }
+    .flow2.stage1 { animation-name:dashFlowShort,stage1; animation-duration:.7s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow2.stage2 { animation-name:dashFlowShort,stage2; animation-duration:.7s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow2.stage3 { animation-name:dashFlowShort,stage3; animation-duration:.7s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow2.stage4 { animation-name:dashFlowShort,stage4; animation-duration:.7s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .flow2.stage5 { animation-name:dashFlowShort,stage5; animation-duration:.7s,10s; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .step-highlight { opacity:0; animation-duration:10s; animation-iteration-count:infinite; animation-timing-function:linear; }
+    .h1 { animation-name:stage1; } .h2 { animation-name:stage2; } .h3 { animation-name:stage3; }
+    .h4 { animation-name:stage4; } .h5 { animation-name:stage5; }
+</style>
+<defs>
+  <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+    <feGaussianBlur stdDeviation="3" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+  <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+    <feGaussianBlur stdDeviation="6" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+</defs>
+<image x="0" y="0" width="1536" height="1024" preserveAspectRatio="none" href="Web_Agent_Architecture.png" xlink:href="Web_Agent_Architecture.png"/>
+<path id="p_start" class="flow stage1" d="M658 155 L658 186"/>
+<path id="p_before_model" class="flow stage2" d="M658 252 L658 280"/>
+<path id="p_model_tools" class="flow stage3" d="M548 333 C515 343 463 346 428 370"/>
+<path id="p_tools_obs" class="flow stage3" d="M428 449 L428 505"/>
+<path id="p_obs_model" class="flow stage4" d="M563 536 L625 536 C641 536 658 522 658 505 L658 370"/>
+<path id="p_model_memory" class="flow stage4" d="M770 333 C813 346 867 348 909 371"/>
+<path id="p_memory_end" class="flow stage5" d="M909 470 L909 505"/>
+<path class="flow2 stage2" d="M837 741 L854 741"/>
+<path class="flow2 stage3" d="M1004 741 L1024 741"/>
+<path class="flow2 stage4" d="M1180 741 L1198 741"/>
+<path class="flow2 stage5" d="M1355 741 L1375 741"/>
+
+<g class="step-highlight h1">
+  <rect x="695" y="668" width="148" height="147" rx="13" fill="none" stroke="#38bdf8" stroke-width="4" filter="url(#softGlow)"/>
+  <rect x="700" y="673" width="138" height="137" rx="9" fill="#38bdf8" fill-opacity="0.08"/>
+</g>
+<g class="step-highlight h2">
+  <rect x="849" y="668" width="161" height="147" rx="13" fill="none" stroke="#4ade80" stroke-width="4" filter="url(#softGlow)"/>
+  <rect x="854" y="673" width="151" height="137" rx="9" fill="#4ade80" fill-opacity="0.08"/>
+</g>
+<g class="step-highlight h3">
+  <rect x="1019" y="668" width="166" height="147" rx="13" fill="none" stroke="#f59e0b" stroke-width="4" filter="url(#softGlow)"/>
+  <rect x="1024" y="673" width="156" height="137" rx="9" fill="#f59e0b" fill-opacity="0.08"/>
+</g>
+<g class="step-highlight h4">
+  <rect x="1193" y="668" width="167" height="147" rx="13" fill="none" stroke="#c084fc" stroke-width="4" filter="url(#softGlow)"/>
+  <rect x="1198" y="673" width="157" height="137" rx="9" fill="#c084fc" fill-opacity="0.08"/>
+</g>
+<g class="step-highlight h5">
+  <rect x="1370" y="668" width="142" height="147" rx="13" fill="none" stroke="#2dd4bf" stroke-width="4" filter="url(#softGlow)"/>
+  <rect x="1375" y="673" width="132" height="137" rx="9" fill="#2dd4bf" fill-opacity="0.08"/>
+</g>
+<path d="M783 857 C783 890 783 892 783 892 L1450 892 C1450 892 1450 890 1450 857"
+      fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-dasharray="6 10" opacity=".35">
+  <animate attributeName="stroke-dashoffset" values="0;-64" dur="1.4s" repeatCount="indefinite"/>
+</path>
+</svg>
