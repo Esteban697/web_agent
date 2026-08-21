@@ -40,7 +40,7 @@ Deploy and test the agent directly in LangSmith Studio with full execution trace
 
 ## Architecture
 
-![Web Agent Architecture](src/simple_agent/docs/Web_Agent_Architecture.png)
+![Web Agent Architecture](src/simple_agent/docs/Web_Agent_Architecture_Animated.svg)
 
 ## Set Up
 
